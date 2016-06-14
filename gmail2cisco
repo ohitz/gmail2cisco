@@ -1,0 +1,328 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+gmail2cisco
+
+=head1 SYNOPSIS
+
+gmail2cisco [OPTIONS] I<INPUT-FILE.CSV> I<OUTPUT-FILE.XML>
+
+=head1 OPTIONS
+
+=over
+
+=item B<--help>
+
+Show help message.
+
+=item B<--groups>=GROUP1,GROUP2...
+
+Specifies which groups to export (comma-separated). By default, all
+contacts containing at least one phone number will be exported.
+
+=item B<--limit>=LIMIT (default: C<100>)
+
+Only the first 100 entries are exported as some Cisco phones crash if
+the file contains more entries. This option allows to set a different
+limit. If set to 0, no limit applies.
+
+=item B<--translate>=FROM=TO
+
+Add a phone number translation rule. Examples:
+
+=over
+
+=item B<--translate>=C<'^+41=0'> transforms C<+41> at the start of a
+number to C<0>.
+
+=item B<--translate>=C<'^+=00'> transformat C<+> to C<00>.
+
+=back
+
+=back
+
+=head1 ARGUMENTS
+
+=over
+
+=item I<INPUT-FILE.XML>
+
+Specifies the exported file (in Google CSV format).
+
+=item I<OUTPUT-FILE.XML>
+
+Specifies the XML output file which can then be imported into a Cisco
+VoIP phone.
+
+=back
+
+=head1 DESCRIPTION
+
+B<gmail2cisco> converts exported gmail phone book data to an XML file
+suitable for importing into a Cisco SPA 525 VoIP phone.
+
+How to use:
+
+=over
+
+=item 1. Export contacts via the Web interface in Google CSV format.
+
+=item 2. Convert the exported file to an XML file using the
+B<gmail2cisco> script.
+
+=item 3. Put the resulting file on a webserver which is reachable by
+the Cisco phone.
+
+=item 4. Point C<Profile Rule> in the Cisco phone to the URL of the
+converted file. The phone will then periodically download that file
+and import the contained entries into its internal phone book.
+
+=back
+
+=head1 AUTHOR
+
+Oliver Hitz <oliver@net-track.ch>
+
+=head1 LICENSE
+
+Licensed under The MIT License.
+
+=cut
+
+use Pod::Usage;
+use Getopt::Long;
+use Text::CSV;
+use XML::Writer;
+use IO::File;
+use strict;
+
+use constant false => 0;
+use constant true  => 1;
+
+my $cfg_help;
+my @cfg_groups;
+my @cfg_translate;
+my $cfg_limit = 100;
+
+if (!GetOptions( "help" => \$cfg_help,
+                 "groups=s" => \@cfg_groups,
+                 "translate=s" => \@cfg_translate,
+                 "limit=i" => \$cfg_limit )) {
+  print pod2usage(-verbose => 1);
+  exit 1;
+}
+
+# Compile number translation stuff.
+my @number_translations;
+
+foreach my $tr (@cfg_translate) {
+  my @from_to = split /=/, $tr;
+  if ($#from_to == 1) {
+    $from_to[0] =~ s/\+/\\\+/g;
+    push @number_translations, { from => $from_to[0], to => $from_to[1] };
+  } else {
+    print "Skipping invalid translation: $tr\n";
+  }
+}
+
+@cfg_groups = split(/,/,join(',',@cfg_groups));
+
+if ($cfg_help) {
+  print pod2usage(-verbose => 2);
+  exit 0;
+}
+
+if ($#ARGV != 1) {
+  print pod2usage(-verbose => 0);
+  exit 1;
+}
+
+my $file_in = $ARGV[0];
+my $file_out = $ARGV[1];
+
+my $csv_in = Text::CSV->new({ binary => 1 });
+
+my $fh_in;
+
+if (!open $fh_in, "<:raw:encoding(utf16)", $file_in) {
+  print STDERR "Unable to open $file_in!\n";
+  exit 1;
+}
+# First row contains column names.
+my $row = $csv_in->getline($fh_in);
+$csv_in->column_names($row);
+
+my $fh_out = IO::File->new("> $file_out");
+if (!defined $fh_out) { 
+  print STDERR "Unable to create $file_out!\n";
+  exit 1;
+}
+
+my $xml_out = new XML::Writer(OUTPUT => $fh_out, ENCODING => "UTF-8", DATA_MODE => true);
+$xml_out->startTag("flat-profile");
+$xml_out->startTag("paddrbook");
+
+my $entries = 0;
+
+while (my $row = $csv_in->getline_hr($fh_in)) {
+  if ($cfg_limit != 0 && $entries == $cfg_limit) {
+    # Limit reached, skip entry.
+    last;
+  }
+
+  # Construct a suitable name out of organization, family name and
+  # given name.
+  my $organization = $row->{"Organization 1 - Name"};
+  my $family_name = $row->{"Family Name"};
+  my $given_name = $row->{"Given Name"};
+
+  my $name = "";
+
+  if ($organization ne "") {
+    $name = $organization;
+    if ($family_name ne "") {
+      $name .= " - ";
+      $name .= $family_name;
+      
+      if ($given_name ne "") {
+	$name .= " ".$given_name;
+      }
+    }
+  } else {
+    $name = $family_name;
+    if ($given_name ne "") {
+      $name .= " ".$given_name;
+    }
+  }
+
+  my $include = 1;
+
+  if (@cfg_groups) {
+    $include = 0;
+
+    foreach my $group (split /\s*:::\s*/, $row->{"Group Membership"}) {
+      # Strip of leading '* ' for predefined groups.
+      $group =~ s/^\*\s//;
+      if (grep $_ eq $group, @cfg_groups) {
+        $include = 1;
+        last;
+      }
+    }
+  }
+
+  if (!$include) {
+    next;
+  }
+
+  # Check for phone numbers.
+  my $numbers = {
+    "Home" => "",
+    "Work" => "",
+    "Mobile" => ""
+  };
+  
+  my $other_numbers = {
+  };
+
+  my $no_number = 1;
+
+  for (my $i = 1; $i <= 3; $i++) {
+    my $type = $row->{"Phone $i - Type"};
+    my $value = $row->{"Phone $i - Value"};
+
+    if ($value ne "") {
+      $no_number = 0;
+
+      if ($type eq "Home" || $type eq "Main") {
+	if ($numbers->{"Home"} eq "") {
+	  $numbers->{"Home"} = translate_number($value);
+	} else {
+	  $other_numbers->{$type} = translate_number($value);
+	}
+      } elsif ($type eq "Work") {
+	if ($numbers->{"Work"} eq "") {
+	  $numbers->{"Work"} = translate_number($value);
+	} else {
+	  $other_numbers->{$type} = translate_number($value);
+	}
+      } elsif ($type eq "Mobile") {
+	if ($numbers->{"Mobile"} eq "") {
+	  $numbers->{"Mobile"} = translate_number($value);
+	} else {
+	  $other_numbers->{$type} = translate_number($value);
+	}
+      } else {
+	$other_numbers->{$type} = translate_number($value);
+      }
+    }
+  }
+
+  if ($no_number) {
+    next;
+  }
+
+  if (0 == scalar(keys %{ $other_numbers })) {
+    # If we have no "other_numbers" defined, create a single entry.
+    $xml_out->startTag("entry");
+    $xml_out->dataElement("name", $name);
+    if ($numbers->{"Home"} ne "") {
+      $xml_out->dataElement("homePhone", $numbers->{"Home"});
+    }
+    if ($numbers->{"Work"} ne "") {
+      $xml_out->dataElement("workPhone", $numbers->{"Work"});
+    }
+    if ($numbers->{"Mobile"} ne "") {
+      $xml_out->dataElement("mobilePhone", $numbers->{"Mobile"});
+    }
+    $xml_out->dataElement("ringToneID", "1");
+    $xml_out->endTag();
+
+    $entries++;
+  } else {
+    # Otherwise create one entry per number.
+    foreach my $type (keys %{ $numbers }) {
+      if ($numbers->{$type} ne "") { 
+	$xml_out->startTag("entry");
+	$xml_out->dataElement("name", "$name - $type");
+	$xml_out->dataElement("homePhone", $numbers->{$type});
+	$xml_out->dataElement("ringToneID", "1");
+	$xml_out->endTag();
+	$entries++;
+      }
+    }
+    foreach my $type (keys %{ $other_numbers }) {
+      $xml_out->startTag("entry");
+      $xml_out->dataElement("name", "$name - $type");
+      $xml_out->dataElement("homePhone", $other_numbers->{$type});
+      $xml_out->dataElement("ringToneID", "1");
+      $xml_out->endTag();
+      $entries++;
+    }
+  }
+}
+$csv_in->eof or $csv_in->error_diag();
+close $fh_in;
+
+$xml_out->endTag();
+$xml_out->endTag();
+$xml_out->end();
+
+$fh_out->close();
+
+print "Converted $entries entries.\n";
+
+exit 0;
+
+# Translate international to national numbers.
+sub translate_number {
+  my $number = shift;
+
+  # Strip whitespace from each number.
+  $number =~ s/\s//g;
+
+  foreach my $tr (@number_translations) {
+    $number =~ s/$tr->{from}/$tr->{to}/;    
+  }
+  return $number;
+}

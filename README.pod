@@ -1,0 +1,88 @@
+=head1 NAME
+
+gmail2cisco
+
+=head1 SYNOPSIS
+
+gmail2cisco [OPTIONS] I<INPUT-FILE.CSV> I<OUTPUT-FILE.XML>
+
+=head1 OPTIONS
+
+=over
+
+=item B<--help>
+
+Show help message.
+
+=item B<--groups>=GROUP1,GROUP2...
+
+Specifies which groups to export (comma-separated). By default, all
+contacts containing at least one phone number will be exported.
+
+=item B<--limit>=LIMIT (default: C<100>)
+
+Only the first 100 entries are exported as some Cisco phones crash if
+the file contains more entries. This option allows to set a different
+limit. If set to 0, no limit applies.
+
+=item B<--translate>=FROM=TO
+
+Add a phone number translation rule. Examples:
+
+=over
+
+=item B<--translate>=C<'^+41=0'> transforms C<+41> at the start of a
+number to C<0>.
+
+=item B<--translate>=C<'^+=00'> transformat C<+> to C<00>.
+
+=back
+
+=back
+
+=head1 ARGUMENTS
+
+=over
+
+=item I<INPUT-FILE.XML>
+
+Specifies the exported file (in Google CSV format).
+
+=item I<OUTPUT-FILE.XML>
+
+Specifies the XML output file which can then be imported into a Cisco
+VoIP phone.
+
+=back
+
+=head1 DESCRIPTION
+
+B<gmail2cisco> converts exported gmail phone book data to an XML file
+suitable for importing into a Cisco SPA 525 VoIP phone.
+
+How to use:
+
+=over
+
+=item 1. Export contacts via the Web interface in Google CSV format.
+
+=item 2. Convert the exported file to an XML file using the
+B<gmail2cisco> script.
+
+=item 3. Put the resulting file on a webserver which is reachable by
+the Cisco phone.
+
+=item 4. Point C<Profile Rule> in the Cisco phone to the URL of the
+converted file. The phone will then periodically download that file
+and import the contained entries into its internal phone book.
+
+=back
+
+=head1 AUTHOR
+
+Oliver Hitz <oliver@net-track.ch>
+
+=head1 LICENSE
+
+Licensed under The MIT License.
+
